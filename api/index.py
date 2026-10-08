@@ -1,7 +1,6 @@
-
 """
 Portero de Andrés - WhatsApp -> Telegram Gatekeeper
-Versión 2 - Stateless para Vercel
+Versión Final - con test-telegram y manejo de mensajes normales
 """
 
 import os
@@ -96,7 +95,7 @@ def webhook():
             msg = entry["messages"][0]
             from_number = msg["from"]
             msg_id = msg["id"]
-            text = msg.get("text", {}).get("body", "")
+            text = msg.get("text", {}).get("body", "") or msg.get("button", {}).get("text", "") or str(msg)
             profile_name = entry.get("contacts", [{}])[0].get("profile", {}).get("name", from_number)
             print(f"Message from {profile_name} {from_number}: {text}")
             pending_messages[from_number] = {"from": from_number, "text": text, "name": profile_name}
@@ -113,16 +112,14 @@ def webhook():
 def telegram_callback():
     data = request.get_json()
     print("Telegram callback:", data)
-    
-    # Si es mensaje normal (como /start o hola), respondemos para confirmar que Telegram funciona
+    # Mensaje normal (ej: /start, hola) - confirma que Telegram funciona
     if "message" in data:
         msg = data["message"]
         chat_id = msg.get("chat", {}).get("id")
         text = msg.get("text", "")
         print(f"Mensaje normal de Telegram chat {chat_id}: {text}")
-        # Respuesta de prueba
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"🟢 Portero activo! Tu CHAT_ID es {chat_id}\nTu PHONE_ID es {WHATSAPP_PHONE_ID}\nManda un WhatsApp al +1 (555) 655-0619 para probar."})
+            json={"chat_id": chat_id, "text": f"🟢 Portero activo! Tu CHAT_ID es {chat_id}\nTu PHONE_ID es {WHATSAPP_PHONE_ID}\n\nManda un WhatsApp al +1 (555) 655-0619 para probar.\n\nPrueba también: https://portero-andres.vercel.app/test-telegram"})
         return jsonify({"status": "ok"}), 200
 
     if "callback_query" in data:
@@ -168,7 +165,6 @@ def telegram_callback():
 
 @app.route("/test-telegram")
 def test_telegram():
-    # Prueba manual: visita https://portero-andres.vercel.app/test-telegram para forzar un mensaje a Telegram
     try:
         r = send_to_telegram("📩 *PRUEBA* - Si ves esto en Telegram, el bot ya funciona!\n\nAhora falta que Meta mande el webhook de WhatsApp.", "34600000000", "test123", "Test User")
         return f"Enviado a Telegram: {r.text} | CHAT_ID={TELEGRAM_CHAT_ID}", 200
