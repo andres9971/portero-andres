@@ -1,6 +1,6 @@
 """
 Portero de Andrés - WhatsApp -> Telegram Gatekeeper
-Versión Final - con test-telegram y manejo de mensajes normales
+Versión FINAL FIX - Stateless + manejo de errores 24h
 """
 
 import os
@@ -19,7 +19,7 @@ pending_messages = {}
 
 def send_to_telegram(text, whatsapp_from, message_id, sender_name=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    safe_from = whatsapp_from[-15:]
+    safe_from = whatsapp_from[-15:]  # solo últimos 15 dígitos para que quepa en callback_data (64 chars limit)
     keyboard = {
         "inline_keyboard": [
             [
@@ -70,7 +70,7 @@ def reply_whatsapp(to_number, text):
         "text": {"body": text}
     }
     r = requests.post(url, headers=headers, json=data)
-    print("WhatsApp reply:", r.text)
+    print("WhatsApp reply to", to_number, ":", r.text)
     return r
 
 @app.route("/webhook", methods=["GET"])
@@ -112,31 +112,37 @@ def webhook():
 def telegram_callback():
     data = request.get_json()
     print("Telegram callback:", data)
-    # Mensaje normal (ej: /start, hola) - confirma que Telegram funciona
+    
+    # Mensaje normal (/start, hola) - confirma que Telegram funciona
     if "message" in data:
         msg = data["message"]
         chat_id = msg.get("chat", {}).get("id")
         text = msg.get("text", "")
         print(f"Mensaje normal de Telegram chat {chat_id}: {text}")
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"🟢 Portero activo! Tu CHAT_ID es {chat_id}\nTu PHONE_ID es {WHATSAPP_PHONE_ID}\n\nManda un WhatsApp al +1 (555) 655-0619 para probar.\n\nPrueba también: https://portero-andres.vercel.app/test-telegram"})
+            json={"chat_id": chat_id, "text": f"🟢 Portero activo! Tu CHAT_ID es {chat_id}\nTu PHONE_ID es {WHATSAPP_PHONE_ID}\nManda un WhatsApp al +1 (555) 655-0619 para probar."})
         return jsonify({"status": "ok"}), 200
 
     if "callback_query" in data:
         cb = data["callback_query"]
         action_data = cb["data"]
+        # Soporta ambos formatos auto|NUMERO y auto_NUMERO
         if "|" in action_data:
             action, from_number = action_data.split("|", 1)
             msg_id = from_number
         else:
             try:
                 action, msg_id = action_data.split("_", 1)
+                from_number = None
             except:
                 action = action_data
                 msg_id = ""
-            from_number = None
+                from_number = None
+        
         cb_message = cb.get("message", {})
         chat_id = cb_message.get("chat", {}).get("id") or cb_message.get("chat_id") or TELEGRAM_CHAT_ID
+        
+        # Busca mensaje original (puede estar en memoria o no por ser stateless)
         original = None
         if from_number:
             original = pending_messages.get(from_number) or pending_messages.get(msg_id)
@@ -144,29 +150,54 @@ def telegram_callback():
             original = pending_messages.get(msg_id)
             if original:
                 from_number = original["from"]
+        
         if not original and from_number:
-            original = {"from": from_number, "text": "(no guardado)", "name": from_number}
+            original = {"from": from_number, "text": "(no guardado - stateless)", "name": from_number}
+        
         if not original:
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": f"⚠️ Servidor reiniciado, perdí el mensaje. Número: {from_number or msg_id}"})
+                json={"chat_id": chat_id, "text": f"⚠️ Servidor reiniciado, perdí el mensaje. Número: {from_number or msg_id}. Mándale un WhatsApp de nuevo para que entre."})
             return jsonify({"status": "no msg"}), 200
+
         if action == "auto":
             respuesta_clon = f"eyy {original['name']}! ahora mismo estoy liado jaja luego te digo bien vale? "
-            reply_whatsapp(original["from"], respuesta_clon)
+            r = reply_whatsapp(original["from"], respuesta_clon)
+            # Si hay error (ej: fuera de ventana 24h), avisa en Telegram
+            try:
+                j = r.json()
+                if "error" in j:
+                    err = j["error"]
+                    msg_err = err.get("message", str(err))
+                    code = err.get("code", "")
+                    print(f"WhatsApp error {code}: {msg_err}")
+                    # Error 24h window
+                    if "24" in msg_err or "template" in msg_err.lower() or code in [131047, 470]:
+                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": f"⚠️ No pude responder a {original['name']} ({original['from']}) porque pasaron más de 24h desde que te escribió.\n\nWhatsApp solo deja responder con texto libre dentro de 24h. Dile que te escriba de nuevo y podrás responder.\n\nError Meta: {msg_err}"})
+                    else:
+                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": f"❌ Error al responder a {original['name']}: {msg_err}\nCode: {code}"})
+                    return jsonify({"status": "wa error"}), 200
+            except Exception as e:
+                print("Error parseando respuesta WA:", e)
+            
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": f"✅ Respondido como tú a {original['name']}"})
+                json={"chat_id": chat_id, "text": f"✅ Respondido como tú a {original['name']} ({original['from']})"})
+        
         elif action == "ignore":
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                 json={"chat_id": chat_id, "text": f"⏭️ Ignorado mensaje de {original['name']}"})
+        
         elif action == "manual":
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": f"💬 Vale, te toca responder tú a {original['from']} en WhatsApp"})
+                json={"chat_id": chat_id, "text": f"💬 Vale, te toca responder tú a {original['from']} en WhatsApp. Abre WhatsApp Business."})
+
     return jsonify({"status": "ok"}), 200
 
 @app.route("/test-telegram")
 def test_telegram():
     try:
-        r = send_to_telegram("📩 *PRUEBA* - Si ves esto en Telegram, el bot ya funciona!\n\nAhora falta que Meta mande el webhook de WhatsApp.", "34600000000", "test123", "Test User")
+        r = send_to_telegram("📩 *PRUEBA* - Si ves esto en Telegram, el bot ya funciona!\n\nAhora falta que Meta mande el webhook de WhatsApp.", "5217298143250", "test123", "Test User")
         return f"Enviado a Telegram: {r.text} | CHAT_ID={TELEGRAM_CHAT_ID}", 200
     except Exception as e:
         return f"Error: {e}", 500
