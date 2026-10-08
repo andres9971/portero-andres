@@ -22,21 +22,27 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "portero_andres_123")  # para verificar
 # Para el resumen con IA (puedes usar OpenAI, Groq, o Meta AI)
 AI_API_KEY = os.getenv("AI_API_KEY")
 
-# Memoria simple de mensajes pendientes: msg_id -> datos originales
+# En Vercel serverless el dict se borra entre peticiones, así que no lo usamos como memoria principal
+# Guardamos el último mensaje en memoria por si coincide en la misma instancia, pero los botones llevan el número dentro
 pending_messages = {}
 
-def send_to_telegram(text, whatsapp_from, message_id):
-    """Manda el resumen a tu Telegram con botones"""
+def send_to_telegram(text, whatsapp_from, message_id, sender_name=""):
+    """Manda el resumen a tu Telegram con botones - 100% stateless para que no se borre en Vercel"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    
+    # Truco: metemos el número de WhatsApp DENTRO del botón, así no dependemos de la memoria de Vercel
+    # Telegram solo deja 64 caracteres por botón, así que usamos formato corto: accion|numero
+    # Ej: auto|34612204265
+    safe_from = whatsapp_from[-15:]  # últimos 15 dígitos por si es largo
     
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "✅ Responder como yo", "callback_data": f"auto_{message_id}"},
-                {"text": "⏭️ Ignorar", "callback_data": f"ignore_{message_id}"}
+                {"text": "✅ Responder como yo", "callback_data": f"auto|{safe_from}"},
+                {"text": "⏭️ Ignorar", "callback_data": f"ignore|{safe_from}"}
             ],
             [
-                {"text": "💬 Respondo yo (abrir WhatsApp)", "callback_data": f"manual_{message_id}"}
+                {"text": "💬 Respondo yo", "callback_data": f"manual|{safe_from}"}
             ]
         ]
     }
@@ -111,14 +117,15 @@ def webhook():
             text = msg.get("text", {}).get("body", "")
             profile_name = entry.get("contacts", [{}])[0].get("profile", {}).get("name", from_number)
 
-            # Guardamos para luego
+            # Guardamos por si es la misma instancia (fallback)
+            pending_messages[from_number] = {"from": from_number, "text": text, "name": profile_name}
             pending_messages[msg_id] = {"from": from_number, "text": text, "name": profile_name}
             
             # Creamos resumen
             resumen = summarize_message(profile_name, text)
             
-            # Lo mandamos a Telegram
-            send_to_telegram(resumen, from_number, msg_id)
+            # Lo mandamos a Telegram (ahora con número dentro del botón)
+            send_to_telegram(resumen, from_number, msg_id, profile_name)
             
     except Exception as e:
         print("Error:", e)
@@ -133,12 +140,35 @@ def telegram_callback():
     
     if "callback_query" in data:
         cb = data["callback_query"]
-        action_data = cb["data"]  # ej: auto_abc123
-        action, msg_id = action_data.split("_", 1)
-        chat_id = cb["message"]["chat_id"]
+        action_data = cb["data"]  # nuevo formato: auto|34612... o formato viejo auto_abc123
+        # Soporte para los 2 formatos
+        if "|" in action_data:
+            action, from_number = action_data.split("|", 1)
+            msg_id = from_number
+        else:
+            action, msg_id = action_data.split("_", 1)
+            from_number = None
+
+        cb_message = cb.get("message", {})
+        # chat_id puede estar en message.chat.id
+        chat_id = cb_message.get("chat", {}).get("id") or cb_message.get("chat_id") or TELEGRAM_CHAT_ID
         
-        original = pending_messages.get(msg_id)
+        # Intentamos recuperar datos originales (si seguimos en misma instancia de Vercel)
+        original = None
+        if from_number:
+            original = pending_messages.get(from_number) or pending_messages.get(msg_id)
+        else:
+            original = pending_messages.get(msg_id)
+            if original:
+                from_number = original["from"]
+
+        # Si no tenemos original (Vercel reinició), usamos lo que viene en el botón
+        if not original and from_number:
+            original = {"from": from_number, "text": "(mensaje original no guardado en esta instancia)", "name": from_number}
+
         if not original:
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": "⚠️ Se reinició el servidor y perdí el mensaje original. Pero el número era " + (from_number or msg_id)})
             return jsonify({"status": "no msg"}), 200
 
         if action == "auto":
