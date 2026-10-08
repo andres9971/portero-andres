@@ -113,6 +113,18 @@ def webhook():
 def telegram_callback():
     data = request.get_json()
     print("Telegram callback:", data)
+    
+    # Si es mensaje normal (como /start o hola), respondemos para confirmar que Telegram funciona
+    if "message" in data:
+        msg = data["message"]
+        chat_id = msg.get("chat", {}).get("id")
+        text = msg.get("text", "")
+        print(f"Mensaje normal de Telegram chat {chat_id}: {text}")
+        # Respuesta de prueba
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": f"🟢 Portero activo! Tu CHAT_ID es {chat_id}\nTu PHONE_ID es {WHATSAPP_PHONE_ID}\nManda un WhatsApp al +1 (555) 655-0619 para probar."})
+        return jsonify({"status": "ok"}), 200
+
     if "callback_query" in data:
         cb = data["callback_query"]
         action_data = cb["data"]
@@ -153,6 +165,15 @@ def telegram_callback():
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                 json={"chat_id": chat_id, "text": f"💬 Vale, te toca responder tú a {original['from']} en WhatsApp"})
     return jsonify({"status": "ok"}), 200
+
+@app.route("/test-telegram")
+def test_telegram():
+    # Prueba manual: visita https://portero-andres.vercel.app/test-telegram para forzar un mensaje a Telegram
+    try:
+        r = send_to_telegram("📩 *PRUEBA* - Si ves esto en Telegram, el bot ya funciona!\n\nAhora falta que Meta mande el webhook de WhatsApp.", "34600000000", "test123", "Test User")
+        return f"Enviado a Telegram: {r.text} | CHAT_ID={TELEGRAM_CHAT_ID}", 200
+    except Exception as e:
+        return f"Error: {e}", 500
 
 @app.route("/")
 def home():
